@@ -1,3 +1,8 @@
+"""
+本代码中  当前状态的即时受益 + 计算的下一时刻状态值的最大值 与当前状态值计算差值；所以本质上为Q-learning
+"""
+
+
 from collections import namedtuple
 import random
 import torch
