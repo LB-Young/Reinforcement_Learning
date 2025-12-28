@@ -52,18 +52,50 @@ class Agent:
         return discounted_rewards
     
     def update_policy(self, rewards, log_probs):
-        breakpoint()
+        """
+        使用策略梯度方法更新深度神经网络策略
+        
+        实现REINFORCE算法（蒙特卡洛策略梯度）：
+        1. 计算每个时间步的折扣回报Gt
+        2. 对回报进行标准化（归一化）
+        3. 计算策略梯度并更新模型参数
+        
+        计算公式：
+        1. 折扣回报计算: G_t = Σ(γ^k * r_{t+k}) for k=0 to T-t
+           其中γ是折扣因子，r是即时奖励，T是轨迹长度
+        
+        2. 回报标准化: G̃_t = (G_t - μ_G) / (σ_G + ε)
+           其中μ_G是所有回报的均值，σ_G是标准差，ε是小常数防止除零
+        
+        3. 策略梯度: ∇_θJ(θ) = E[-log(π_θ(a_t|s_t)) * G̃_t]
+           最终的损失函数: L(θ) = Σ(-log(π_θ(a_t|s_t)) * G̃_t)
+        
+        参数:
+        - rewards: 一个episode中每步获得的奖励列表
+        - log_probs: 相应动作的对数概率列表
+        """
+        # 计算每个时间步的折扣未来回报
         discounted_rewards = self.discounted_future_reward(rewards)
+        # 转换为张量以便进行计算
         discounted_rewards = torch.tensor(discounted_rewards)
+        # 标准化回报以减少方差（提高训练稳定性）
         discounted_rewards = (discounted_rewards - discounted_rewards.mean())/(discounted_rewards.std() + 1e-9)
         
+        # 计算每个时间步的策略梯度
         policy_grads = []
         for log_prob, Gt in zip(log_probs, discounted_rewards):
-            policy_grads.append(-log_prob * Gt)         # policy_grads是一种loss
-
+            # 策略梯度计算: -log(π_θ(a_t|s_t)) * G_t
+            # 负号是因为我们要进行梯度上升（最大化期望回报）
+            # 而优化器默认执行梯度下降（最小化损失）
+            policy_grads.append(-log_prob * Gt)
+        
+        # 清除之前累积的梯度
         self.optimizer.zero_grad()
+        # 将所有时间步的梯度求和
         policy_grad = torch.stack(policy_grads).sum()
+        # 反向传播计算梯度
         policy_grad.backward()
+        # 更新策略网络参数
         self.optimizer.step()
 
 
