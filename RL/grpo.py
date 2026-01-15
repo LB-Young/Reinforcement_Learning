@@ -21,6 +21,7 @@ from dataclasses import dataclass  # 数据类装饰器
 import wandb  # 实验跟踪工具
 from tqdm import tqdm  # 进度条显示
 import json  # JSON数据处理
+from accelerate import Accelerator  # 多GPU训练加速器
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)  # 配置日志级别为INFO
@@ -30,8 +31,8 @@ logger = logging.getLogger(__name__)  # 获取当前模块的日志记录器
 class GRPOConfig:
     """GRPO训练配置"""
     # 模型配置
-    policy_model_name: str = "Qwen/Qwen2-0.5B"  # 策略模型名称，用于生成回复
-    reward_model_name: str = "OpenAssistant/reward-model-deberta-v3-large-v2"  # 奖励模型名称，用于评估回复质量
+    policy_model_name: str = r"E:\models\Qwen\Qwen3-0___6B"  # 策略模型名称，用于生成回复
+    reward_model_name: str = r"E:\models\reward-model-deberta-v3-large-v2"  # 奖励模型名称，用于评估回复质量
     # 注意：GRPO不需要critic模型！
     
     # 训练配置
@@ -53,6 +54,10 @@ class GRPOConfig:
     # GRPO特有参数
     group_size: int = 4  # 每组的样本数量，用于相对比较
     use_group_normalization: bool = True  # 是否使用组内标准化
+    
+    # 多GPU配置
+    use_multi_gpu: bool = True  # 是否使用多GPU训练
+    mixed_precision: str = "fp16"  # 混合精度训练：fp16, bf16, no
     
     # 其他配置
     save_steps: int = 500  # 每隔多少步保存一次模型检查点
@@ -92,7 +97,18 @@ class GRPOTrainer:
     
     def __init__(self, config: GRPOConfig):
         self.config = config  # 保存训练配置
-        self.device = torch.device(config.device)  # 设置计算设备(CPU/GPU)
+        
+        # 🔥 初始化Accelerator用于多GPU训练
+        if config.use_multi_gpu:
+            self.accelerator = Accelerator(
+                mixed_precision=config.mixed_precision,  # 混合精度训练
+                gradient_accumulation_steps=config.gradient_accumulation_steps  # 梯度累积
+            )
+            self.device = self.accelerator.device  # 使用accelerator管理的设备
+            logger.info(f"使用多GPU训练，设备数量: {self.accelerator.num_processes}")
+        else:
+            self.accelerator = None
+            self.device = torch.device(config.device)  # 设置计算设备(CPU/GPU)
         
         # 初始化tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(config.policy_model_name)  # 加载预训练分词器
@@ -105,38 +121,70 @@ class GRPOTrainer:
         # 初始化优化器
         self._init_optimizers()  # 调用优化器初始化方法
         
+        # 🔥 使用Accelerator准备模型和优化器
+        if self.accelerator:
+            self.policy_model, self.policy_optimizer = self.accelerator.prepare(
+                self.policy_model, self.policy_optimizer
+            )
+            # 奖励模型和参考模型不需要训练，只需要移到设备上
+            self.reward_model = self.accelerator.prepare(self.reward_model)
+            self.ref_policy_model = self.accelerator.prepare(self.ref_policy_model)
+        
         # 初始化KL系数（用于自适应调整）
         self.kl_coef = config.kl_coef  # 当前KL散度惩罚系数
         
-        # 初始化wandb
-        if config.use_wandb:  # 如果启用wandb实验跟踪
+        # 初始化wandb（只在主进程）
+        if config.use_wandb and (not self.accelerator or self.accelerator.is_main_process):
             wandb.init(project="grpo-qwen", config=config.__dict__)  # 初始化wandb项目
     
     def _init_models(self):
         """初始化策略模型和奖励模型（GRPO不需要critic模型）"""
         logger.info("正在加载模型...")
         
-        # 策略模型 (Qwen2-0.5B)
-        self.policy_model = AutoModelForCausalLM.from_pretrained(  # 加载因果语言模型用作策略
-            self.config.policy_model_name,
-            torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32,  # GPU使用半精度，CPU使用单精度
-            device_map="auto" if self.device.type == "cuda" else None  # GPU自动分配设备，CPU不分配
-        )
+        # 🔥 多GPU训练时不使用device_map="auto"，让Accelerator管理设备分配
+        if self.config.use_multi_gpu:
+            # 策略模型 (Qwen2-0.5B)
+            self.policy_model = AutoModelForCausalLM.from_pretrained(
+                self.config.policy_model_name,
+                torch_dtype=torch.float16,  # 使用半精度
+            )
+            
+            # 奖励模型
+            self.reward_model = AutoModelForSequenceClassification.from_pretrained(
+                self.config.reward_model_name,
+                torch_dtype=torch.float16,
+            )
+            
+            # 参考策略模型
+            self.ref_policy_model = AutoModelForCausalLM.from_pretrained(
+                self.config.policy_model_name,
+                torch_dtype=torch.float16,
+            )
+        else:
+            # 单GPU或CPU训练
+            self.policy_model = AutoModelForCausalLM.from_pretrained(
+                self.config.policy_model_name,
+                torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32,
+                device_map="auto" if self.device.type == "cuda" else None
+            )
+            
+            self.reward_model = AutoModelForSequenceClassification.from_pretrained(
+                self.config.reward_model_name,
+                torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32,
+                device_map="auto" if self.device.type == "cuda" else None
+            )
+            
+            self.ref_policy_model = AutoModelForCausalLM.from_pretrained(
+                self.config.policy_model_name,
+                torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32,
+                device_map="auto" if self.device.type == "cuda" else None
+            )
         
-        # 奖励模型
-        self.reward_model = AutoModelForSequenceClassification.from_pretrained(  # 加载序列分类模型用作奖励模型
-            self.config.reward_model_name,
-            torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32,  # 数据类型配置
-            device_map="auto" if self.device.type == "cuda" else None  # 设备分配配置
-        )
-        self.reward_tokenizer = AutoTokenizer.from_pretrained(self.config.reward_model_name)  # 奖励模型专用分词器
+        self.reward_tokenizer = AutoTokenizer.from_pretrained(self.config.reward_model_name)
+        # 为reward tokenizer设置pad_token
+        if self.reward_tokenizer.pad_token is None:
+            self.reward_tokenizer.pad_token = self.reward_tokenizer.eos_token
         
-        # 保存参考策略模型
-        self.ref_policy_model = AutoModelForCausalLM.from_pretrained(  # 加载参考策略模型，用于计算KL散度
-            self.config.policy_model_name,
-            torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32,  # 数据类型设置
-            device_map="auto" if self.device.type == "cuda" else None  # 设备映射
-        )
         self.ref_policy_model.eval()  # 设置为评估模式，不更新参数
         
         logger.info("模型加载完成（GRPO无需critic模型）")
@@ -394,8 +442,19 @@ class GRPOTrainer:
             
             # 策略模型更新
             self.policy_optimizer.zero_grad()  # 清零策略模型梯度
-            total_loss.backward()  # 反向传播总损失
-            torch.nn.utils.clip_grad_norm_(self.policy_model.parameters(), 1.0)  # 梯度裁剪，防止梯度爆炸
+            
+            # 🔥 使用Accelerator的backward或普通backward
+            if self.accelerator:
+                self.accelerator.backward(total_loss)  # Accelerator管理的反向传播
+            else:
+                total_loss.backward()  # 普通反向传播
+            
+            # 梯度裁剪
+            if self.accelerator:
+                self.accelerator.clip_grad_norm_(self.policy_model.parameters(), 1.0)
+            else:
+                torch.nn.utils.clip_grad_norm_(self.policy_model.parameters(), 1.0)
+            
             self.policy_optimizer.step()  # 更新策略模型参数
             
             total_policy_loss += policy_loss.item()  # 累加策略损失值
@@ -434,6 +493,10 @@ class GRPOTrainer:
             shuffle=True  # 每个epoch随机打乱数据顺序
         )
         
+        # 🔥 使用Accelerator准备dataloader
+        if self.accelerator:
+            dataloader = self.accelerator.prepare(dataloader)
+        
         global_step = 0  # 全局训练步数计数器
         
         for epoch in range(self.config.num_epochs):  # 遍历每个训练轮次
@@ -449,47 +512,58 @@ class GRPOTrainer:
                 metrics = self.train_step(batch_prompts)  # 执行一步GRPO训练并获取指标
                 epoch_metrics.append(metrics)  # 将指标添加到epoch指标列表
                 
-                # 记录指标
-                if self.config.use_wandb:  # 如果启用wandb日志记录
+                # 记录指标（只在主进程）
+                if self.config.use_wandb and (not self.accelerator or self.accelerator.is_main_process):
                     wandb.log({  # 记录训练指标到wandb
                         "step": global_step,  # 当前步数
                         "epoch": epoch,  # 当前epoch
                         **metrics  # 展开所有训练指标
                     })
                 
-                # 保存检查点
-                if global_step % self.config.save_steps == 0:  # 每隔指定步数保存检查点
-                    self.save_checkpoint(global_step)  # 保存当前模型状态
+                # 保存检查点（只在主进程）
+                if global_step % self.config.save_steps == 0:
+                    if not self.accelerator or self.accelerator.is_main_process:
+                        self.save_checkpoint(global_step)
                 
                 global_step += 1  # 增加全局步数计数
                 
-                # 打印进度
-                if batch_idx % 10 == 0:  # 每10个批次打印一次进度
-                    logger.info(f"Step {global_step}: {metrics}")
+                # 打印进度（只在主进程）
+                if batch_idx % 10 == 0:
+                    if not self.accelerator or self.accelerator.is_main_process:
+                        logger.info(f"Step {global_step}: {metrics}")
             
             # 计算epoch平均指标
             avg_metrics = {}  # 存储平均指标的字典
             for key in epoch_metrics[0].keys():  # 遍历指标的所有键
                 avg_metrics[f"epoch_{key}"] = np.mean([m[key] for m in epoch_metrics])  # 计算每个指标在整个epoch的平均值
             
-            logger.info(f"Epoch {epoch + 1} 平均指标: {avg_metrics}")
+            if not self.accelerator or self.accelerator.is_main_process:
+                logger.info(f"Epoch {epoch + 1} 平均指标: {avg_metrics}")
             
-            if self.config.use_wandb:  # 如果启用wandb
+            if self.config.use_wandb and (not self.accelerator or self.accelerator.is_main_process):
                 wandb.log(avg_metrics)  # 记录epoch平均指标
         
-        logger.info("GRPO训练完成!")
-        self.save_checkpoint("final")  # 保存最终模型检查点
+        if not self.accelerator or self.accelerator.is_main_process:
+            logger.info("GRPO训练完成!")
+            self.save_checkpoint("final")  # 保存最终模型检查点
     
     def save_checkpoint(self, step):
         """保存模型检查点（GRPO只需保存策略模型）"""
-        checkpoint_dir = os.path.join(self.config.output_dir, f"checkpoint-{step}")  # 构建检查点目录路径
-        os.makedirs(checkpoint_dir, exist_ok=True)  # 创建检查点目录，如果已存在则不报错
+        checkpoint_dir = os.path.join(self.config.output_dir, f"checkpoint-{step}")
+        os.makedirs(checkpoint_dir, exist_ok=True)
         
-        # 保存策略模型
-        self.policy_model.save_pretrained(os.path.join(checkpoint_dir, "policy"))  # 保存策略模型到policy子目录
+        # 🔥 使用Accelerator的unwrap_model获取原始模型
+        if self.accelerator:
+            unwrapped_model = self.accelerator.unwrap_model(self.policy_model)
+            unwrapped_model.save_pretrained(
+                os.path.join(checkpoint_dir, "policy"),
+                save_function=self.accelerator.save  # 使用accelerator的保存函数
+            )
+        else:
+            self.policy_model.save_pretrained(os.path.join(checkpoint_dir, "policy"))
         
         # 保存tokenizer
-        self.tokenizer.save_pretrained(checkpoint_dir)  # 保存分词器配置和词汇表
+        self.tokenizer.save_pretrained(checkpoint_dir)
         
         logger.info(f"检查点已保存到 {checkpoint_dir}")
 
@@ -533,6 +607,15 @@ def main():
     """主函数"""
     # 创建配置
     config = GRPOConfig()
+    
+    # 验证模型路径是否存在
+    if not os.path.exists(config.policy_model_name):
+        raise FileNotFoundError(f"策略模型路径不存在: {config.policy_model_name}")
+    if not os.path.exists(config.reward_model_name):
+        raise FileNotFoundError(f"奖励模型路径不存在: {config.reward_model_name}")
+    
+    logger.info(f"策略模型路径: {config.policy_model_name}")
+    logger.info(f"奖励模型路径: {config.reward_model_name}")
     
     # 创建输出目录
     os.makedirs(config.output_dir, exist_ok=True)
