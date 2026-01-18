@@ -1,16 +1,28 @@
 #!/usr/bin/env python3
+# author: YoungL
+# date: 2026/01/18
+# email: lby15356@gmail.com
+
 """
-标准版 GRPO 训练脚本 - 实现 Token-level Ratio 与 KL 计算
+标准版 GRPO 训练脚本
+注：
+1. 由于项目着重于强化学习算法的实现和各种强化学习算法异同的对比，故只涉及整体流程，不包含工程层面的调度优化；
+2. 由于本项目实验环境仅包含5060ti-16G * 2，所以将policy模型放在0号gpu，reference、reward两个模型放在1号gpu；
 """
 
 import os
 import shutil  # 在脚本顶部添加导入
+import sys
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModelForSequenceClassification
 from typing import List, Tuple, Dict
 from tqdm import tqdm
+
+# 添加项目根目录到 Python 路径
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from utils import plot_grpo_metrics
 
 # ==================== 配置 ====================
 POLICY_MODEL = "/home/bayon/models/Qwen/Qwen3-0___6B"
@@ -28,7 +40,7 @@ BATCH_SIZE = 4 # 增加 Token-level 计算后显存占用会升高，适当调�
 LEARNING_RATE = 1e-6
 DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 NUM_EPOCHS = 1
-GROUP_SIZE = 48
+GROUP_SIZE = 8
 GRPO_EPOCHS = 4
 CLIP_RANGE = 0.2
 KL_COEF = 0.01  # KL 惩罚系数
@@ -52,6 +64,12 @@ class GRPOTrainer:
         self.device_policy = torch.device("cuda:0")
         self.device_ref = torch.device("cuda:1") if num_gpus > 1 else torch.device("cuda:0")
         self.device_reward = torch.device("cuda:1") if num_gpus > 1 else torch.device("cuda:0")
+        
+        # 初始化指标记录
+        self.metrics_history = {
+            'loss': [],
+            'reward': []
+        }
         
         self.tokenizer = AutoTokenizer.from_pretrained(POLICY_MODEL)
         if self.tokenizer.pad_token is None:
@@ -171,9 +189,15 @@ class GRPOTrainer:
             self.optimizer.step()
             total_loss += step_loss.item()
             
-        return {"loss": total_loss / GRPO_EPOCHS, "reward": rewards.mean().item()}
+        metrics = {"loss": total_loss / GRPO_EPOCHS, "reward": rewards.mean().item()}
+        
+        # 记录指标
+        for key, value in metrics.items():
+            self.metrics_history[key].append(value)
+        
+        return metrics
 
-def train(self, dataset):
+    def train(self, dataset):
         dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
         for epoch in range(NUM_EPOCHS):
             pbar = tqdm(dataloader)
@@ -199,6 +223,15 @@ def train(self, dataset):
             # --- 修改部分结束 ---
             
             print(f"模型保存至: {save_path}")
+        
+        # 训练结束后绘制指标图表
+        print("\n正在生成训练指标图表...")
+        plot_grpo_metrics(
+            losses=self.metrics_history['loss'],
+            rewards=self.metrics_history['reward'],
+            save_path=os.path.join(OUTPUT_DIR, "training_metrics.png")
+        )
+        print(f"训练指标图表已保存至: {os.path.join(OUTPUT_DIR, 'training_metrics.png')}")
 
 def main():
     prompts = ["如何制作一杯好咖啡？", "解释量子纠缠。", "写一段冒泡排序代码。"] * 10
