@@ -4,6 +4,7 @@
 """
 
 import os
+import shutil  # 在脚本顶部添加导入
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
@@ -14,16 +15,24 @@ from tqdm import tqdm
 # ==================== 配置 ====================
 POLICY_MODEL = "/home/bayon/models/Qwen/Qwen3-0___6B"
 REWARD_MODEL = "/home/bayon/models/reward-model-deberta-v3-large-v2"
+train_datasets = [
+    {
+        "path":"/home/bayon/datas/MATH-Hard/train/algebra.jsonl",
+        "type":"jsonl",
+        "input":"problem",
+        "output":"solution"
+    }
+]
 
-BATCH_SIZE = 2 # 增加 Token-level 计算后显存占用会升高，适当调小
+BATCH_SIZE = 4 # 增加 Token-level 计算后显存占用会升高，适当调小
 LEARNING_RATE = 1e-6
 DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 NUM_EPOCHS = 1
-GROUP_SIZE = 4
+GROUP_SIZE = 48
 GRPO_EPOCHS = 4
 CLIP_RANGE = 0.2
 KL_COEF = 0.01  # KL 惩罚系数
-OUTPUT_DIR = "/home/bayon/projects/trained_models/grpo_simple_kl_test2"
+OUTPUT_DIR = "/home/bayon/projects/trained_models/exprement_1/train_1"
 
 # ==================== 数据集 ====================
 class SimpleDataset(Dataset):
@@ -164,7 +173,7 @@ class GRPOTrainer:
             
         return {"loss": total_loss / GRPO_EPOCHS, "reward": rewards.mean().item()}
 
-    def train(self, dataset):
+def train(self, dataset):
         dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
         for epoch in range(NUM_EPOCHS):
             pbar = tqdm(dataloader)
@@ -172,8 +181,23 @@ class GRPOTrainer:
                 metrics = self.train_step(batch["prompt"])
                 pbar.set_description(f"L:{metrics['loss']:.4f} R:{metrics['reward']:.2f}")
 
+            # --- 修改部分开始 ---
             save_path = os.path.join(OUTPUT_DIR, f"epoch_{epoch+1}")
             self.policy_model.save_pretrained(save_path)
+            self.tokenizer.save_pretrained(save_path) # 建议同时保存 tokenizer
+            
+            # 自动获取当前正在运行的脚本绝对路径
+            current_script = os.path.abspath(__file__)
+            # 目标路径，例如：.../epoch_1/train_script.py
+            target_script = os.path.join(save_path, "train_script.py")
+            
+            try:
+                shutil.copy2(current_script, target_script)
+                print(f"脚本已备份至: {target_script}")
+            except Exception as e:
+                print(f"脚本备份失败: {e}")
+            # --- 修改部分结束 ---
+            
             print(f"模型保存至: {save_path}")
 
 def main():
@@ -182,5 +206,23 @@ def main():
     trainer = GRPOTrainer()
     trainer.train(dataset)
 
+
+
+
+def train_main():
+    prompts = []
+    for datasets in train_datasets:
+        if datasets['type'] == "jsonl":
+            import json
+            with open(datasets['path'], "r", encoding='utf-8') as f:
+                for item in json.load(f):
+                    prompts.append(item[datasets['input']])
+    # breakpoint()
+    dataset = SimpleDataset(prompts)
+    trainer = GRPOTrainer()
+    trainer.train(dataset)
+
+
 if __name__ == "__main__":
-    main()
+    # main()
+    train_main()
