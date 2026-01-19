@@ -56,7 +56,7 @@ KL_COEF = 0.01  # KL 惩罚系数
 OUTPUT_DIR = r"E:\projects\train_related\trained_model\rl_exprement\grpo_output\grpo_gsm8k_v1"
 
 # ==================== 数据集 ====================
-class SimpleDataset(Dataset):
+class GRPODataset(Dataset):
     def __init__(self, prompts: List[str]):
         self.prompts = prompts
     
@@ -295,7 +295,7 @@ class GRPOTrainer:
 
 def main():
     prompts = ["如何制作一杯好咖啡？", "解释量子纠缠。", "写一段冒泡排序代码。"] * 10
-    dataset = SimpleDataset(prompts)
+    dataset = GRPODataset(prompts)
     trainer = GRPOTrainer()
     trainer.train(dataset)
 
@@ -320,7 +320,7 @@ def train_main():
 
     prompts = prompts[:20]
     # breakpoint()
-    dataset = SimpleDataset(prompts)
+    dataset = GRPODataset(prompts)
     trainer = GRPOTrainer()
     trainer.train(dataset)
 
