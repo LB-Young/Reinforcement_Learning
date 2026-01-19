@@ -13,6 +13,7 @@
 import os
 import shutil  # 在脚本顶部添加导入
 import sys
+import gc  # 添加垃圾回收模块
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
@@ -22,29 +23,37 @@ from tqdm import tqdm
 
 # 添加项目根目录到 Python 路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from utils import plot_grpo_metrics
+
+# 导入绘图函数
+from utils.plot_metrics import plot_grpo_metrics
 
 # ==================== 配置 ====================
-POLICY_MODEL = "/home/bayon/models/Qwen/Qwen3-0___6B"
-REWARD_MODEL = "/home/bayon/models/reward-model-deberta-v3-large-v2"
+POLICY_MODEL = r"E:\models\Qwen\Qwen3-0___6B"
+REWARD_MODEL = r"E:\models\reward-model-deberta-v3-large-v2"
 train_datasets = [
+    # {
+    #     "path":"/home/bayon/datas/MATH-Hard/train/algebra.jsonl",
+    #     "type":"jsonl",
+    #     "input":"problem",
+    #     "output":"solution"
+    # },
     {
-        "path":"/home/bayon/datas/MATH-Hard/train/algebra.jsonl",
-        "type":"jsonl",
-        "input":"problem",
-        "output":"solution"
+        "path":r"E:\datasets\gsm8k\main\train-00000-of-00001.parquet",
+        "type":"parquet",
+        "input":"question",
+        "output":"answer"
     }
 ]
 
-BATCH_SIZE = 4 # 增加 Token-level 计算后显存占用会升高，适当调小
+BATCH_SIZE = 2 # 增加 Token-level 计算后显存占用会升高，适当调小
 LEARNING_RATE = 1e-6
 DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 NUM_EPOCHS = 1
-GROUP_SIZE = 8
+GROUP_SIZE = 4
 GRPO_EPOCHS = 4
 CLIP_RANGE = 0.2
 KL_COEF = 0.01  # KL 惩罚系数
-OUTPUT_DIR = "/home/bayon/projects/trained_models/exprement_1/train_1"
+OUTPUT_DIR = r"E:\projects\train_related\trained_model\rl_exprement\grpo_output\grpo_gsm8k_v1"
 
 # ==================== 数据集 ====================
 class SimpleDataset(Dataset):
@@ -68,7 +77,8 @@ class GRPOTrainer:
         # 初始化指标记录
         self.metrics_history = {
             'loss': [],
-            'reward': []
+            'reward': [],
+            'entropy': []
         }
         
         self.tokenizer = AutoTokenizer.from_pretrained(POLICY_MODEL)
@@ -106,11 +116,16 @@ class GRPOTrainer:
             responses = self.tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
             all_responses.extend(responses)
             all_prompts.extend([prompt] * GROUP_SIZE)
+            
+            # 释放当前循环的张量
+            del inputs, outputs, gen_ids
         
+        # 清理显存
+        torch.cuda.empty_cache()
         return all_responses, all_prompts
 
-    def get_token_log_probs(self, model, prompts: List[str], responses: List[str], device) -> Tuple[torch.Tensor, torch.Tensor]:
-        """核心修改：获取 Token 级别的 log_probs 并返回 Mask"""
+    def get_token_log_probs(self, model, prompts: List[str], responses: List[str], device) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """核心修改：获取 Token 级别的 log_probs 并返回 Mask 和 Entropy"""
         full_texts = [p + r for p, r in zip(prompts, responses)]
         inputs = self.tokenizer(full_texts, return_tensors="pt", padding=True, truncation=True).to(device)
         
@@ -125,12 +140,23 @@ class GRPOTrainer:
         log_probs = F.log_softmax(logits, dim=-1)
         token_log_probs = log_probs.gather(2, labels.unsqueeze(-1)).squeeze(-1)
         
+        # 计算熵值 (仅在response区域)
+        probs = F.softmax(logits, dim=-1)
+        entropy = -(probs * log_probs).sum(dim=-1)  # [batch_size, seq_len]
+        
         # 制作 Mask: 1 仅在 Response 区域且非 Padding 处
         mask = torch.zeros_like(labels, dtype=torch.bool)
         for i, p_len in enumerate(prompt_lens):
             mask[i, p_len:] = (labels[i, p_len:] != self.tokenizer.pad_token_id)
-            
-        return token_log_probs, mask
+        
+        # 释放labels，不再需要
+        del prompt_inputs, inputs, outputs, logits, probs, labels
+        
+        # 强制清理显存
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+
+        return token_log_probs, mask, entropy
 
     def compute_rewards(self, prompts: List[str], responses: List[str]) -> torch.Tensor:
         rewards = []
@@ -139,7 +165,13 @@ class GRPOTrainer:
             with torch.no_grad():
                 reward = self.reward_model(**inputs).logits[0, 0]
                 rewards.append(reward)
-        return torch.stack(rewards).to(self.device_policy)
+            # 释放当前循环的张量
+            del inputs
+        
+        result = torch.stack(rewards).to(self.device_policy)
+        # 清理显存
+        torch.cuda.empty_cache()
+        return result
 
     def train_step(self, batch_prompts: List[str]) -> Dict[str, float]:
         responses, prompts_expanded = self.generate_responses(batch_prompts)
@@ -154,15 +186,24 @@ class GRPOTrainer:
 
         # 2. 获取参考 log_probs 和初始旧分布 log_probs (Token-level)
         with torch.no_grad():
-            ref_log_probs, _ = self.get_token_log_probs(self.ref_model, prompts_expanded, responses, self.device_ref)
+            ref_log_probs, _, _ = self.get_token_log_probs(self.ref_model, prompts_expanded, responses, self.device_ref)
             ref_log_probs = ref_log_probs.to(self.device_policy)
-            old_log_probs, mask = self.get_token_log_probs(self.policy_model, prompts_expanded, responses, self.device_policy)
+            old_log_probs, mask, _ = self.get_token_log_probs(self.policy_model, prompts_expanded, responses, self.device_policy)
+            # 确保old_log_probs不需要梯度，避免累积计算图
+            old_log_probs = old_log_probs.detach()
+            mask = mask.detach()
         
         # 3. 策略优化循环
         self.policy_model.train()
         total_loss = 0
+        total_entropy = 0
         for _ in range(GRPO_EPOCHS):
-            new_log_probs, _ = self.get_token_log_probs(self.policy_model, prompts_expanded, responses, self.device_policy)
+            new_log_probs, _, entropy = self.get_token_log_probs(self.policy_model, prompts_expanded, responses, self.device_policy)
+            
+            # 计算平均熵值 (仅在response区域)
+            masked_entropy = entropy * mask.float()
+            avg_entropy = masked_entropy.sum() / mask.sum()
+            total_entropy += avg_entropy.item()
             
             # --- 标准计算逻辑 ---
             # Importance Sampling Ratio
@@ -189,7 +230,25 @@ class GRPOTrainer:
             self.optimizer.step()
             total_loss += step_loss.item()
             
-        metrics = {"loss": total_loss / GRPO_EPOCHS, "reward": rewards.mean().item()}
+            # 显式清理显存，避免OOM
+            # 1. 删除张量变量
+            del new_log_probs, entropy, masked_entropy, log_ratio, ratio, surr1, surr2, policy_loss, kl_div, loss_map, step_loss
+            
+            # 2. 清理梯度缓存（重要：清理模型的中间状态）
+            self.optimizer.zero_grad(set_to_none=True)  # 更彻底地清理梯度
+            
+            # 3. 清理PyTorch的计算图缓存
+            if hasattr(torch.cuda, 'empty_cache'):
+                torch.cuda.empty_cache()
+            
+            # 4. 强制垃圾回收（可选，但在显存紧张时有帮助）
+            gc.collect()
+            
+        metrics = {
+            "loss": total_loss / GRPO_EPOCHS, 
+            "reward": rewards.mean().item(),
+            "entropy": total_entropy / GRPO_EPOCHS
+        }
         
         # 记录指标
         for key, value in metrics.items():
@@ -203,7 +262,7 @@ class GRPOTrainer:
             pbar = tqdm(dataloader)
             for batch in pbar:
                 metrics = self.train_step(batch["prompt"])
-                pbar.set_description(f"L:{metrics['loss']:.4f} R:{metrics['reward']:.2f}")
+                pbar.set_description(f"L:{metrics['loss']:.4f} R:{metrics['reward']:.2f} E:{metrics['entropy']:.3f}")
 
             # --- 修改部分开始 ---
             save_path = os.path.join(OUTPUT_DIR, f"epoch_{epoch+1}")
@@ -229,6 +288,7 @@ class GRPOTrainer:
         plot_grpo_metrics(
             losses=self.metrics_history['loss'],
             rewards=self.metrics_history['reward'],
+            entropies=self.metrics_history['entropy'],
             save_path=os.path.join(OUTPUT_DIR, "training_metrics.png")
         )
         print(f"训练指标图表已保存至: {os.path.join(OUTPUT_DIR, 'training_metrics.png')}")
@@ -244,12 +304,21 @@ def main():
 
 def train_main():
     prompts = []
+    
     for datasets in train_datasets:
         if datasets['type'] == "jsonl":
             import json
             with open(datasets['path'], "r", encoding='utf-8') as f:
                 for item in json.load(f):
                     prompts.append(item[datasets['input']])
+        if datasets['type'] == 'parquet':
+            import pyarrow.parquet as pq
+            table = pq.read_table(datasets['path'])
+            df = table.to_pandas()
+            for index, row in df.iterrows():
+                prompts.append(row['question'])
+
+    prompts = prompts[:20]
     # breakpoint()
     dataset = SimpleDataset(prompts)
     trainer = GRPOTrainer()

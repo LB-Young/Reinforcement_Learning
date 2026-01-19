@@ -132,6 +132,83 @@ def plot_loss_and_entropy(
     plt.close()
 
 
+def plot_ppo_metrics_with_entropy(
+    policy_losses: List[float],
+    value_losses: List[float],
+    rewards: List[float],
+    advantages: List[float],
+    entropies: List[float],
+    save_path: Optional[str] = None,
+    figsize: tuple = (15, 12)
+):
+    """
+    专门为 PPO 算法绘制指标（包含熵）
+    
+    Args:
+        policy_losses: 策略损失列表
+        value_losses: 价值损失列表
+        rewards: 奖励列表
+        advantages: 优势值列表
+        entropies: 熵列表
+        save_path: 保存路径
+        figsize: 图片大小
+    """
+    fig, axes = plt.subplots(3, 2, figsize=figsize)
+    fig.suptitle('PPO Training Metrics (with Entropy)', fontsize=16, fontweight='bold')
+    
+    steps = range(1, len(policy_losses) + 1)
+    
+    # 策略损失
+    axes[0, 0].plot(steps, policy_losses, linewidth=2, marker='o', markersize=4, color='#e74c3c')
+    axes[0, 0].set_xlabel('Step')
+    axes[0, 0].set_ylabel('Policy Loss')
+    axes[0, 0].set_title('Policy Loss', fontweight='bold')
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # 价值损失
+    axes[0, 1].plot(steps, value_losses, linewidth=2, marker='s', markersize=4, color='#9b59b6')
+    axes[0, 1].set_xlabel('Step')
+    axes[0, 1].set_ylabel('Value Loss')
+    axes[0, 1].set_title('Value Loss', fontweight='bold')
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    # 奖励
+    axes[1, 0].plot(steps, rewards, linewidth=2, marker='^', markersize=4, color='#2ecc71')
+    axes[1, 0].set_xlabel('Step')
+    axes[1, 0].set_ylabel('Reward')
+    axes[1, 0].set_title('Average Reward', fontweight='bold')
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # 优势值
+    axes[1, 1].plot(steps, advantages, linewidth=2, marker='d', markersize=4, color='#3498db')
+    axes[1, 1].set_xlabel('Step')
+    axes[1, 1].set_ylabel('Advantage')
+    axes[1, 1].set_title('Average Advantage', fontweight='bold')
+    axes[1, 1].grid(True, alpha=0.3)
+    axes[1, 1].axhline(y=0, color='r', linestyle='--', alpha=0.5)
+    
+    # 熵
+    axes[2, 0].plot(steps, entropies, linewidth=2, marker='*', markersize=6, color='#f39c12')
+    axes[2, 0].set_xlabel('Step')
+    axes[2, 0].set_ylabel('Entropy')
+    axes[2, 0].set_title('Policy Entropy', fontweight='bold')
+    axes[2, 0].grid(True, alpha=0.3)
+    
+    # 隐藏最后一个子图
+    axes[2, 1].axis('off')
+    
+    plt.tight_layout()
+    
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"图表已保存至: {save_path}")
+    else:
+        plt.show()
+    
+    plt.close()
+
+
 def plot_ppo_metrics(
     policy_losses: List[float],
     value_losses: List[float],
@@ -197,7 +274,43 @@ def plot_ppo_metrics(
     plt.close()
 
 
-def plot_grpo_metrics(
+def plot_grpo_metrics(losses, rewards, entropies, save_path):
+    """绘制GRPO训练指标"""
+    try:
+        import matplotlib.pyplot as plt
+        
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 12))
+        
+        # Loss曲线
+        ax1.plot(losses, 'b-', linewidth=2)
+        ax1.set_title('Training Loss', fontsize=14)
+        ax1.set_xlabel('Step')
+        ax1.set_ylabel('Loss')
+        ax1.grid(True, alpha=0.3)
+        
+        # Reward曲线
+        ax2.plot(rewards, 'g-', linewidth=2)
+        ax2.set_title('Average Reward', fontsize=14)
+        ax2.set_xlabel('Step')
+        ax2.set_ylabel('Reward')
+        ax2.grid(True, alpha=0.3)
+        
+        # Entropy曲线
+        ax3.plot(entropies, 'r-', linewidth=2)
+        ax3.set_title('Policy Entropy', fontsize=14)
+        ax3.set_xlabel('Step')
+        ax3.set_ylabel('Entropy')
+        ax3.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+    except ImportError:
+        print("matplotlib未安装，跳过绘图")
+
+
+def plot_grpo_metrics_advanced(
     losses: List[float],
     rewards: List[float],
     kl_divs: Optional[List[float]] = None,
@@ -205,7 +318,7 @@ def plot_grpo_metrics(
     figsize: tuple = (15, 5)
 ):
     """
-    专门为 GRPO 算法绘制指标
+    专门为 GRPO 算法绘制指标（高级版本）
     
     Args:
         losses: 损失列表

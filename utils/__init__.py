@@ -12,6 +12,7 @@ from .plot_metrics import (
     plot_training_metrics,
     plot_loss_and_entropy,
     plot_ppo_metrics,
+    plot_ppo_metrics_with_entropy,
     plot_grpo_metrics
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     'plot_training_metrics',
     'plot_loss_and_entropy',
     'plot_ppo_metrics',
+    'plot_ppo_metrics_with_entropy',
     'plot_grpo_metrics'
 ]

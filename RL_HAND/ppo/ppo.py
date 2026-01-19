@@ -27,9 +27,9 @@ from utils import plot_ppo_metrics
 
 # ===================== 1. 配置 ==========================
 # model
-ACTOR_MODEL = "/home/bayon/models/Qwen/Qwen3-0___6B"
-CRITIC_MODEL = "/home/bayon/models/Qwen/Qwen3-0___6B"
-REWARD_DODEL = "/home/bayon/models/reward-model-deberta-v3-large-v2"
+ACTOR_MODEL = r"E:\models\Qwen\Qwen3-0___6B"
+CRITIC_MODEL = r"E:\models\Qwen\Qwen3-0___6B"
+REWARD_MODEL = r"E:\models\reward-model-deberta-v3-large-v2"
 
 DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
@@ -38,8 +38,8 @@ NUM_EPOCHES = 1
 BATCH_SIZE = 4
 GROUP_SIZE = 1  # 为了与后续grpo对齐
 GROUP_EPOCHES = 4
-DLIP_RANGE = 0.2
-OUTPUT_DIR = "/home/bayon/projects/trained_models/exprement_ppo/train_demo_v1"
+CLIP_RANGE = 0.2
+OUTPUT_DIR = r"E:\projects\train_related\trained_model\rl_test\ppo_test1"
 
 # ===================== 2. 数据集处理 =====================
 class PPODataset(Dataset):
@@ -58,7 +58,7 @@ class PPOTrainer:
 
         # num_gpus = torch.cuda.device_count()
         # 
-        self.device_polity = torch.device("cuda:0")
+        self.device_policy = torch.device("cuda:0")
         self.device_ref = torch.device("cuda:0")
         self.device_critic = torch.device("cuda:1")
         self.device_reward = torch.device("cuda:1")
@@ -68,13 +68,14 @@ class PPOTrainer:
             'policy_loss': [],
             'value_loss': [],
             'reward': [],
-            'advantage': []
+            'advantage': [],
+            'entropy': []
         }
 
         self.policy_model = AutoModelForCausalLM.from_pretrained(
             ACTOR_MODEL,
             torch_dtype=DTYPE,
-            device_map={"": self.device_polity}
+            device_map={"": self.device_policy}
         )
         self.reference_model = AutoModelForCausalLM.from_pretrained(
             ACTOR_MODEL,
@@ -96,11 +97,11 @@ class PPOTrainer:
             self.critic_tokenizer.pad_token_id = self.critic_tokenizer.eos_token_id
 
         self.reward_model = AutoModelForSequenceClassification.from_pretrained(
-            REWARD_DODEL,
+            REWARD_MODEL,
             torch_dtype=DTYPE,
             device_map={"": self.device_reward}
         )
-        self.reward_tokenizer = AutoTokenizer.from_pretrained(REWARD_DODEL, trust_remote_code=True)
+        self.reward_tokenizer = AutoTokenizer.from_pretrained(REWARD_MODEL, trust_remote_code=True)
 
         self.policy_optimizer = torch.optim.AdamW(self.policy_model.parameters(), lr=LEARNING_RATE)
         self.critic_optimizer = torch.optim.AdamW(self.critic_model.parameters(), lr=LEARNING_RATE)
@@ -110,7 +111,7 @@ class PPOTrainer:
         all_responses, all_prompts = [], []
 
         for prompt in prompts:
-            inputs = self.policy_tokenizer(prompt, return_tensors='pt').to(self.device_polity)
+            inputs = self.policy_tokenizer(prompt, return_tensors='pt').to(self.device_policy)
             with torch.no_grad():
                 outputs = self.policy_model.generate(
                     **inputs,
@@ -158,21 +159,53 @@ class PPOTrainer:
             with torch.no_grad():
                 reward = self.reward_model(**inputs).logits[0, 0]
                 rewards.append(reward)
-        return torch.stack(rewards).to(self.device_polity)
+        return torch.stack(rewards).to(self.device_policy)
     
-    def compute_values(self, prompts: List[str], responses: List[str]) -> torch.Tensor:
+    def compute_entropy(self, prompts: List[str], responses: List[str]) -> torch.Tensor:
+        """计算策略的熵"""
+        full_texts = [p + r for p, r in zip(prompts, responses)]
+        inputs = self.policy_tokenizer(full_texts, return_tensors="pt", padding=True, truncation=True).to(self.device_policy)
+        
+        # 计算 Prompt 的长度
+        prompt_lens = [len(self.policy_tokenizer.encode(p, add_special_tokens=False)) for p in prompts]
+        
+        with torch.no_grad():
+            outputs = self.policy_model(**inputs)
+        logits = outputs.logits[:, :-1, :]  # Shift 对齐
+        labels = inputs["input_ids"][:, 1:]
+        
+        # 计算概率分布和熵
+        probs = F.softmax(logits, dim=-1)
+        log_probs = F.log_softmax(logits, dim=-1)
+        entropy = -(probs * log_probs).sum(dim=-1)  # [B, seq_len]
+        
+        # 制作 Mask: 1 仅在 Response 区域且非 Padding 处
+        mask = torch.zeros_like(labels, dtype=torch.bool)
+        for i, p_len in enumerate(prompt_lens):
+            mask[i, p_len:] = (labels[i, p_len:] != self.policy_tokenizer.pad_token_id)
+        
+        # 计算平均熵（仅在response区域）
+        masked_entropy = entropy * mask
+        avg_entropy = masked_entropy.sum() / mask.sum()
+        
+        return avg_entropy
+
+    def compute_values(self, prompts: List[str], responses: List[str], requires_grad: bool = False) -> torch.Tensor:
         """使用 critic_model 计算状态价值"""
         values = []
         for p, r in zip(prompts, responses):
             full_text = p + r
             inputs = self.critic_tokenizer(full_text, return_tensors="pt", truncation=True).to(self.device_critic)
-            with torch.no_grad():
+            if requires_grad:
                 outputs = self.critic_model(**inputs)
-                # 使用最后一个 token 的 logits 作为 value（简化实现）
-                # 更标准的做法是添加一个 value head
-                value = outputs.logits[0, -1, :].mean()  # 简化：取最后一层的平均
-                values.append(value)
-        return torch.stack(values).to(self.device_polity)
+            else:
+                with torch.no_grad():
+                    outputs = self.critic_model(**inputs)
+            # 使用最后一个 token 的 logits 作为 value（简化实现）
+            # 更标准的做法是添加一个 value head
+            value = outputs.logits[0, -1, :].mean()  # 简化：取最后一层的平均
+            values.append(value)
+        return torch.stack(values).to(self.device_policy)
 
     def train_step(self, batch_prompts: List[str]) -> Dict[str, float]:
         # 1. 生成响应
@@ -180,20 +213,23 @@ class PPOTrainer:
 
         # 2. 计算奖励和价值
         rewards = self.compute_rewards(prompts, responses)
-        values = self.compute_values(prompts, responses)
+        values = self.compute_values(prompts, responses, requires_grad=False)
         advantages = rewards - values  # [B]
+        
+        # 3. 计算熵
+        entropy = self.compute_entropy(prompts, responses)
 
-        # 3. 获取参考 log_probs 和初始旧分布 log_probs (Token-level)
+        # 4. 获取参考 log_probs 和初始旧分布 log_probs (Token-level)
         with torch.no_grad():
             ref_log_probs, _ = self.get_token_log_probs(
                 self.reference_model, prompts, responses, self.device_ref, self.policy_tokenizer
             )
-            ref_log_probs = ref_log_probs.to(self.device_polity)
+            ref_log_probs = ref_log_probs.to(self.device_policy)
             old_log_probs, mask = self.get_token_log_probs(
-                self.policy_model, prompts, responses, self.device_polity, self.policy_tokenizer
+                self.policy_model, prompts, responses, self.device_policy, self.policy_tokenizer
             )
 
-        # 4. PPO更新循环
+        # 5. PPO更新循环
         self.policy_model.train()
         total_policy_loss = 0
         total_value_loss = 0
@@ -201,7 +237,7 @@ class PPOTrainer:
         for _ in range(GROUP_EPOCHES):
             # 获取新的 log_probs
             new_log_probs, _ = self.get_token_log_probs(
-                self.policy_model, prompts, responses, self.device_polity, self.policy_tokenizer
+                self.policy_model, prompts, responses, self.device_policy, self.policy_tokenizer
             )
 
             # 计算策略损失 (PPO Clip)
@@ -209,7 +245,7 @@ class PPOTrainer:
             ratio = torch.exp(log_ratio)
             adv_t = advantages.unsqueeze(1)  # 广播优势到每个 Token [B, 1]
             surr1 = ratio * adv_t
-            surr2 = torch.clamp(ratio, 1 - DLIP_RANGE, 1 + DLIP_RANGE) * adv_t
+            surr2 = torch.clamp(ratio, 1 - CLIP_RANGE, 1 + CLIP_RANGE) * adv_t
             policy_loss = -torch.min(surr1, surr2)
             
             # KL 惩罚
@@ -226,7 +262,7 @@ class PPOTrainer:
             self.policy_optimizer.step()
 
             # 计算价值损失（简化版：直接用 rewards 作为目标）
-            new_values = self.compute_values(prompts, responses)
+            new_values = self.compute_values(prompts, responses, requires_grad=True)
             value_loss = F.mse_loss(new_values, rewards)
 
             # 更新价值网络
@@ -242,7 +278,8 @@ class PPOTrainer:
             "policy_loss": total_policy_loss / GROUP_EPOCHES,
             "value_loss": total_value_loss / GROUP_EPOCHES,
             "reward": rewards.mean().item(),
-            "advantage": advantages.mean().item()
+            "advantage": advantages.mean().item(),
+            "entropy": entropy.item()
         }
         
         # 记录指标
@@ -260,7 +297,7 @@ class PPOTrainer:
                 metrics = self.train_step(batch["prompt"])
                 pbar.set_description(
                     f"PL:{metrics['policy_loss']:.4f} VL:{metrics['value_loss']:.4f} "
-                    f"R:{metrics['reward']:.2f} A:{metrics['advantage']:.2f}"
+                    f"R:{metrics['reward']:.2f} A:{metrics['advantage']:.2f} E:{metrics['entropy']:.3f}"
                 )
 
             # 保存模型
@@ -287,14 +324,27 @@ class PPOTrainer:
         
         # 训练结束后绘制指标图表
         print("\n正在生成训练指标图表...")
-        plot_ppo_metrics(
+        
+        # 使用通用的训练指标绘制函数
+        from utils.plot_metrics import plot_training_metrics, plot_ppo_metrics_with_entropy
+        plot_training_metrics(
+            metrics_history=self.metrics_history,
+            save_path=os.path.join(OUTPUT_DIR, "training_metrics_detailed.png"),
+            title="PPO Training Metrics with Entropy"
+        )
+        
+        # 使用包含熵的PPO专用图表
+        plot_ppo_metrics_with_entropy(
             policy_losses=self.metrics_history['policy_loss'],
             value_losses=self.metrics_history['value_loss'],
             rewards=self.metrics_history['reward'],
             advantages=self.metrics_history['advantage'],
-            save_path=os.path.join(OUTPUT_DIR, "training_metrics.png")
+            entropies=self.metrics_history['entropy'],
+            save_path=os.path.join(OUTPUT_DIR, "ppo_metrics_with_entropy.png")
         )
-        print(f"训练指标图表已保存至: {os.path.join(OUTPUT_DIR, 'training_metrics.png')}")
+        
+        print(f"详细训练指标图表已保存至: {os.path.join(OUTPUT_DIR, 'training_metrics_detailed.png')}")
+        print(f"PPO专用指标图表（含熵）已保存至: {os.path.join(OUTPUT_DIR, 'ppo_metrics_with_entropy.png')}")
 
 
 
