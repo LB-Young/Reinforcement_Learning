@@ -392,7 +392,7 @@ def train_main():
     prompts = prompts[:20]
     # breakpoint()
     dataset = PPODataset(prompts)
-    trainer = GRPOTrainer()
+    trainer = PPOTrainer()
     trainer.train(dataset)
 
 
