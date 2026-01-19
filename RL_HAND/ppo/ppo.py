@@ -31,6 +31,21 @@ ACTOR_MODEL = r"E:\models\Qwen\Qwen3-0___6B"
 CRITIC_MODEL = r"E:\models\Qwen\Qwen3-0___6B"
 REWARD_MODEL = r"E:\models\reward-model-deberta-v3-large-v2"
 
+train_datasets = [
+    # {
+    #     "path":"/home/bayon/datas/MATH-Hard/train/algebra.jsonl",
+    #     "type":"jsonl",
+    #     "input":"problem",
+    #     "output":"solution"
+    # },
+    {
+        "path":r"E:\datasets\gsm8k\main\train-00000-of-00001.parquet",
+        "type":"parquet",
+        "input":"question",
+        "output":"answer"
+    }
+]
+
 DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
 LEARNING_RATE = 1e-6
@@ -39,7 +54,7 @@ BATCH_SIZE = 4
 GROUP_SIZE = 1  # 为了与后续grpo对齐
 GROUP_EPOCHES = 4
 CLIP_RANGE = 0.2
-OUTPUT_DIR = r"E:\projects\train_related\trained_model\rl_test\ppo_test1"
+OUTPUT_DIR = r"E:\projects\train_related\trained_model\rl_exprement\grpo_output\ppo_gsm8k_v1"
 
 # ===================== 2. 数据集处理 =====================
 class PPODataset(Dataset):
@@ -357,5 +372,31 @@ def main():
     trainer.train(datasets)
 
 
-if __name__ == '__main__':
-    main()
+
+def train_main():
+    prompts = []
+    
+    for datasets in train_datasets:
+        if datasets['type'] == "jsonl":
+            import json
+            with open(datasets['path'], "r", encoding='utf-8') as f:
+                for item in json.load(f):
+                    prompts.append(item[datasets['input']])
+        if datasets['type'] == 'parquet':
+            import pyarrow.parquet as pq
+            table = pq.read_table(datasets['path'])
+            df = table.to_pandas()
+            for index, row in df.iterrows():
+                prompts.append(row['question'])
+
+    prompts = prompts[:20]
+    # breakpoint()
+    dataset = SimpleDataset(prompts)
+    trainer = GRPOTrainer()
+    trainer.train(dataset)
+
+
+
+if __name__ == "__main__":
+    # main()
+    train_main()
