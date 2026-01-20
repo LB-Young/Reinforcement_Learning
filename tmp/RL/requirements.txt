@@ -1,7 +1,0 @@
-torch
-transformers
-datasets
-numpy
-wandb
-tqdm
-accelerate

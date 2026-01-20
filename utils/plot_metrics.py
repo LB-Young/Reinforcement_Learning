@@ -388,3 +388,381 @@ if __name__ == "__main__":
         advantages=[0.1, 0.15, 0.2, 0.18, 0.16, 0.14, 0.12, 0.10],
         save_path="ppo_metrics.png"
     )
+
+def plot_dapo_metrics(
+    policy_losses: List[float],
+    entropy_losses: List[float],
+    rewards: List[float],
+    entropies: List[float],
+    dynamic_resample_rates: List[float],
+    avg_response_lengths: List[float],
+    save_path: Optional[str] = None,
+    figsize: tuple = (18, 12)
+):
+    """
+    专门为 DAPO 算法绘制指标
+    
+    Args:
+        policy_losses: 策略损失列表
+        entropy_losses: 熵损失列表
+        rewards: 奖励列表
+        entropies: 熵列表
+        dynamic_resample_rates: 动态重采样率列表
+        avg_response_lengths: 平均回复长度列表
+        save_path: 保存路径
+        figsize: 图片大小
+    """
+    fig, axes = plt.subplots(3, 2, figsize=figsize)
+    fig.suptitle('DAPO Training Metrics', fontsize=16, fontweight='bold')
+    
+    steps = range(1, len(policy_losses) + 1)
+    
+    # 策略损失
+    axes[0, 0].plot(steps, policy_losses, linewidth=2, marker='o', markersize=4, color='#e74c3c')
+    axes[0, 0].set_xlabel('Step')
+    axes[0, 0].set_ylabel('Policy Loss')
+    axes[0, 0].set_title('Policy Loss (Token-Level)', fontweight='bold')
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # 熵损失
+    axes[0, 1].plot(steps, entropy_losses, linewidth=2, marker='s', markersize=4, color='#9b59b6')
+    axes[0, 1].set_xlabel('Step')
+    axes[0, 1].set_ylabel('Entropy Loss')
+    axes[0, 1].set_title('Entropy Loss', fontweight='bold')
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    # 奖励
+    axes[1, 0].plot(steps, rewards, linewidth=2, marker='^', markersize=4, color='#2ecc71')
+    axes[1, 0].set_xlabel('Step')
+    axes[1, 0].set_ylabel('Reward')
+    axes[1, 0].set_title('Average Reward', fontweight='bold')
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # 熵
+    axes[1, 1].plot(steps, entropies, linewidth=2, marker='d', markersize=4, color='#f39c12')
+    axes[1, 1].set_xlabel('Step')
+    axes[1, 1].set_ylabel('Entropy')
+    axes[1, 1].set_title('Policy Entropy', fontweight='bold')
+    axes[1, 1].grid(True, alpha=0.3)
+    
+    # 🔥 动态重采样率 (DAPO特有)
+    axes[2, 0].plot(steps, dynamic_resample_rates, linewidth=2, marker='*', markersize=6, color='#3498db')
+    axes[2, 0].set_xlabel('Step')
+    axes[2, 0].set_ylabel('Dynamic Resample Rate')
+    axes[2, 0].set_title('Dynamic Resample Rate', fontweight='bold')
+    axes[2, 0].grid(True, alpha=0.3)
+    axes[2, 0].set_ylim(0, 1)
+    
+    # 🔥 平均回复长度 (DAPO特有)
+    axes[2, 1].plot(steps, avg_response_lengths, linewidth=2, marker='h', markersize=4, color='#e67e22')
+    axes[2, 1].set_xlabel('Step')
+    axes[2, 1].set_ylabel('Avg Response Length')
+    axes[2, 1].set_title('Average Response Length', fontweight='bold')
+    axes[2, 1].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"图表已保存至: {save_path}")
+    else:
+        plt.show()
+    
+    plt.close()
+
+
+def plot_dapo_vs_grpo_comparison(
+    dapo_losses: List[float],
+    grpo_losses: List[float],
+    dapo_rewards: List[float],
+    grpo_rewards: List[float],
+    dapo_entropies: List[float],
+    grpo_entropies: List[float],
+    save_path: Optional[str] = None,
+    figsize: tuple = (15, 10)
+):
+    """
+    绘制 DAPO 与 GRPO 的对比图表
+    
+    Args:
+        dapo_losses: DAPO损失列表
+        grpo_losses: GRPO损失列表
+        dapo_rewards: DAPO奖励列表
+        grpo_rewards: GRPO奖励列表
+        dapo_entropies: DAPO熵列表
+        grpo_entropies: GRPO熵列表
+        save_path: 保存路径
+        figsize: 图片大小
+    """
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    fig.suptitle('DAPO vs GRPO Comparison', fontsize=16, fontweight='bold')
+    
+    dapo_steps = range(1, len(dapo_losses) + 1)
+    grpo_steps = range(1, len(grpo_losses) + 1)
+    
+    # 损失对比
+    axes[0, 0].plot(dapo_steps, dapo_losses, linewidth=2, marker='o', markersize=4, 
+                    color='#e74c3c', label='DAPO (Token-Level)')
+    axes[0, 0].plot(grpo_steps, grpo_losses, linewidth=2, marker='s', markersize=4, 
+                    color='#3498db', label='GRPO (Sample-Level)')
+    axes[0, 0].set_xlabel('Step')
+    axes[0, 0].set_ylabel('Loss')
+    axes[0, 0].set_title('Training Loss Comparison', fontweight='bold')
+    axes[0, 0].grid(True, alpha=0.3)
+    axes[0, 0].legend()
+    
+    # 奖励对比
+    axes[0, 1].plot(dapo_steps, dapo_rewards, linewidth=2, marker='o', markersize=4, 
+                    color='#e74c3c', label='DAPO')
+    axes[0, 1].plot(grpo_steps, grpo_rewards, linewidth=2, marker='s', markersize=4, 
+                    color='#3498db', label='GRPO')
+    axes[0, 1].set_xlabel('Step')
+    axes[0, 1].set_ylabel('Reward')
+    axes[0, 1].set_title('Average Reward Comparison', fontweight='bold')
+    axes[0, 1].grid(True, alpha=0.3)
+    axes[0, 1].legend()
+    
+    # 熵对比
+    axes[1, 0].plot(dapo_steps, dapo_entropies, linewidth=2, marker='o', markersize=4, 
+                    color='#e74c3c', label='DAPO (Clip-Higher)')
+    axes[1, 0].plot(grpo_steps, grpo_entropies, linewidth=2, marker='s', markersize=4, 
+                    color='#3498db', label='GRPO (Symmetric Clip)')
+    axes[1, 0].set_xlabel('Step')
+    axes[1, 0].set_ylabel('Entropy')
+    axes[1, 0].set_title('Policy Entropy Comparison', fontweight='bold')
+    axes[1, 0].grid(True, alpha=0.3)
+    axes[1, 0].legend()
+    
+    # 算法特性对比（文本说明）
+    axes[1, 1].axis('off')
+    comparison_text = """
+DAPO vs GRPO Key Differences:
+
+🔥 DAPO Improvements:
+• Clip-Higher: [0.8, 1.28] vs [0.8, 1.2]
+• Token-Level Loss vs Sample-Level
+• Dynamic Sampling for training signal
+• No KL Penalty (KL_COEF = 0.0)
+• Overlong Response Filtering
+
+📊 Expected Benefits:
+• Prevents entropy collapse
+• Better long-chain reasoning
+• Faster convergence (50% steps)
+• Higher final performance
+    """
+    axes[1, 1].text(0.05, 0.95, comparison_text, transform=axes[1, 1].transAxes,
+                    fontsize=11, verticalalignment='top', fontfamily='monospace',
+                    bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray", alpha=0.8))
+    
+    plt.tight_layout()
+    
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"对比图表已保存至: {save_path}")
+    else:
+        plt.show()
+    
+    plt.close()
+def plot_gspo_metrics(
+    policy_losses: List[float],
+    entropy_losses: List[float],
+    kl_losses: List[float],
+    rewards: List[float],
+    relative_advantages: List[float],
+    kl_divergences: List[float],
+    kl_coefs: List[float],
+    avg_response_lengths: List[float],
+    save_path: Optional[str] = None,
+    figsize: tuple = (20, 15)
+):
+    """
+    专门为 GSPO 算法绘制指标
+    
+    Args:
+        policy_losses: 策略损失列表
+        entropy_losses: 熵损失列表
+        kl_losses: KL损失列表
+        rewards: 奖励列表
+        relative_advantages: 相对优势列表
+        kl_divergences: KL散度列表
+        kl_coefs: KL系数列表
+        avg_response_lengths: 平均回复长度列表
+        save_path: 保存路径
+        figsize: 图片大小
+    """
+    fig, axes = plt.subplots(4, 2, figsize=figsize)
+    fig.suptitle('GSPO Training Metrics', fontsize=16, fontweight='bold')
+    
+    steps = range(1, len(policy_losses) + 1)
+    
+    # 策略损失
+    axes[0, 0].plot(steps, policy_losses, linewidth=2, marker='o', markersize=4, color='#e74c3c')
+    axes[0, 0].set_xlabel('Step')
+    axes[0, 0].set_ylabel('Policy Loss')
+    axes[0, 0].set_title('Policy Loss (Sequence-Level)', fontweight='bold')
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # 熵损失
+    axes[0, 1].plot(steps, entropy_losses, linewidth=2, marker='s', markersize=4, color='#9b59b6')
+    axes[0, 1].set_xlabel('Step')
+    axes[0, 1].set_ylabel('Entropy Loss')
+    axes[0, 1].set_title('Entropy Loss', fontweight='bold')
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    # KL损失
+    axes[1, 0].plot(steps, kl_losses, linewidth=2, marker='^', markersize=4, color='#f39c12')
+    axes[1, 0].set_xlabel('Step')
+    axes[1, 0].set_ylabel('KL Loss')
+    axes[1, 0].set_title('KL Divergence Loss', fontweight='bold')
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # 奖励
+    axes[1, 1].plot(steps, rewards, linewidth=2, marker='d', markersize=4, color='#2ecc71')
+    axes[1, 1].set_xlabel('Step')
+    axes[1, 1].set_ylabel('Reward')
+    axes[1, 1].set_title('Average Reward', fontweight='bold')
+    axes[1, 1].grid(True, alpha=0.3)
+    
+    # 🔥 相对优势 (GSPO特有)
+    axes[2, 0].plot(steps, relative_advantages, linewidth=2, marker='*', markersize=6, color='#3498db')
+    axes[2, 0].set_xlabel('Step')
+    axes[2, 0].set_ylabel('Relative Advantage')
+    axes[2, 0].set_title('Relative Advantage (Group-based)', fontweight='bold')
+    axes[2, 0].grid(True, alpha=0.3)
+    axes[2, 0].axhline(y=0, color='r', linestyle='--', alpha=0.5)
+    
+    # 🔥 KL散度 (GSPO特有)
+    axes[2, 1].plot(steps, kl_divergences, linewidth=2, marker='h', markersize=4, color='#e67e22')
+    axes[2, 1].set_xlabel('Step')
+    axes[2, 1].set_ylabel('KL Divergence')
+    axes[2, 1].set_title('KL Divergence from Reference', fontweight='bold')
+    axes[2, 1].grid(True, alpha=0.3)
+    
+    # 🔥 自适应KL系数 (GSPO特有)
+    axes[3, 0].plot(steps, kl_coefs, linewidth=2, marker='v', markersize=4, color='#8e44ad')
+    axes[3, 0].set_xlabel('Step')
+    axes[3, 0].set_ylabel('KL Coefficient')
+    axes[3, 0].set_title('Adaptive KL Coefficient', fontweight='bold')
+    axes[3, 0].grid(True, alpha=0.3)
+    
+    # 平均回复长度
+    axes[3, 1].plot(steps, avg_response_lengths, linewidth=2, marker='p', markersize=4, color='#16a085')
+    axes[3, 1].set_xlabel('Step')
+    axes[3, 1].set_ylabel('Avg Response Length')
+    axes[3, 1].set_title('Average Response Length', fontweight='bold')
+    axes[3, 1].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"图表已保存至: {save_path}")
+    else:
+        plt.show()
+    
+    plt.close()
+
+
+def plot_gspo_vs_grpo_comparison(
+    gspo_losses: List[float],
+    grpo_losses: List[float],
+    gspo_rewards: List[float],
+    grpo_rewards: List[float],
+    gspo_relative_advantages: List[float],
+    grpo_relative_rewards: List[float],
+    save_path: Optional[str] = None,
+    figsize: tuple = (15, 10)
+):
+    """
+    绘制 GSPO 与 GRPO 的对比图表
+    
+    Args:
+        gspo_losses: GSPO损失列表
+        grpo_losses: GRPO损失列表
+        gspo_rewards: GSPO奖励列表
+        grpo_rewards: GRPO奖励列表
+        gspo_relative_advantages: GSPO相对优势列表
+        grpo_relative_rewards: GRPO相对奖励列表
+        save_path: 保存路径
+        figsize: 图片大小
+    """
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    fig.suptitle('GSPO vs GRPO Comparison', fontsize=16, fontweight='bold')
+    
+    gspo_steps = range(1, len(gspo_losses) + 1)
+    grpo_steps = range(1, len(grpo_losses) + 1)
+    
+    # 损失对比
+    axes[0, 0].plot(gspo_steps, gspo_losses, linewidth=2, marker='o', markersize=4, 
+                    color='#e74c3c', label='GSPO (Group Sequence)')
+    axes[0, 0].plot(grpo_steps, grpo_losses, linewidth=2, marker='s', markersize=4, 
+                    color='#3498db', label='GRPO (Group Relative)')
+    axes[0, 0].set_xlabel('Step')
+    axes[0, 0].set_ylabel('Loss')
+    axes[0, 0].set_title('Training Loss Comparison', fontweight='bold')
+    axes[0, 0].grid(True, alpha=0.3)
+    axes[0, 0].legend()
+    
+    # 奖励对比
+    axes[0, 1].plot(gspo_steps, gspo_rewards, linewidth=2, marker='o', markersize=4, 
+                    color='#e74c3c', label='GSPO')
+    axes[0, 1].plot(grpo_steps, grpo_rewards, linewidth=2, marker='s', markersize=4, 
+                    color='#3498db', label='GRPO')
+    axes[0, 1].set_xlabel('Step')
+    axes[0, 1].set_ylabel('Reward')
+    axes[0, 1].set_title('Average Reward Comparison', fontweight='bold')
+    axes[0, 1].grid(True, alpha=0.3)
+    axes[0, 1].legend()
+    
+    # 相对优势/奖励对比
+    axes[1, 0].plot(gspo_steps, gspo_relative_advantages, linewidth=2, marker='o', markersize=4, 
+                    color='#e74c3c', label='GSPO (Relative Advantage)')
+    axes[1, 0].plot(grpo_steps, grpo_relative_rewards, linewidth=2, marker='s', markersize=4, 
+                    color='#3498db', label='GRPO (Relative Reward)')
+    axes[1, 0].set_xlabel('Step')
+    axes[1, 0].set_ylabel('Relative Value')
+    axes[1, 0].set_title('Relative Advantage/Reward Comparison', fontweight='bold')
+    axes[1, 0].grid(True, alpha=0.3)
+    axes[1, 0].legend()
+    axes[1, 0].axhline(y=0, color='r', linestyle='--', alpha=0.5)
+    
+    # 算法特性对比（文本说明）
+    axes[1, 1].axis('off')
+    comparison_text = """
+GSPO vs GRPO Key Differences:
+
+🔥 GSPO Features:
+• Group Sampling: Multi-response per prompt
+• Sequence-Level Rewards: Full sequence evaluation
+• Relative Advantage: Group-based baseline
+• Adaptive KL: Dynamic KL coefficient adjustment
+• Flexible Optimization: Sequence/Token level
+
+📊 GRPO Features:
+• Group Relative Policy: Relative rewards
+• Token-Level Loss: Fine-grained optimization
+• Fixed KL: Static KL coefficient
+• Simpler Architecture: Fewer hyperparameters
+
+🎯 Use Cases:
+• GSPO: Complex reasoning, diverse generation
+• GRPO: Long text generation, efficiency focus
+    """
+    axes[1, 1].text(0.05, 0.95, comparison_text, transform=axes[1, 1].transAxes,
+                    fontsize=10, verticalalignment='top', fontfamily='monospace',
+                    bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray", alpha=0.8))
+    
+    plt.tight_layout()
+    
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"对比图表已保存至: {save_path}")
+    else:
+        plt.show()
+    
+    plt.close()
