@@ -338,25 +338,20 @@ class GSPOTrainer:
         responses_truncated = responses[:len(relative_advantages)]
         response_lengths_truncated = response_lengths[:len(relative_advantages)]
         
-        # 计算log概率
-        log_probs, token_log_probs_list = self.compute_log_probs(
-            prompts_truncated, responses_truncated, use_ref_model=False, return_per_token=USE_TOKEN_LEVEL_LOSS
-        )
+        # 计算KL散度惩罚（使用参考模型）
+        with torch.no_grad():
+            ref_log_probs, _ = self.compute_log_probs(prompts_truncated, responses_truncated, use_ref_model=True)
         
-        # 如果使用token-level loss，detach旧的token级别log概率
-        old_token_log_probs_list = None
-        if USE_TOKEN_LEVEL_LOSS and token_log_probs_list:
-            old_token_log_probs_list = [t.detach() for t in token_log_probs_list]
-        
-        # 计算KL散度惩罚
-        ref_log_probs, _ = self.compute_log_probs(prompts_truncated, responses_truncated, use_ref_model=True)
-        kl_penalty = log_probs - ref_log_probs
+        # 计算初始log概率（用于后续对比）
+        with torch.no_grad():
+            old_log_probs, old_token_log_probs_list = self.compute_log_probs(
+                prompts_truncated, responses_truncated, use_ref_model=False, return_per_token=USE_TOKEN_LEVEL_LOSS
+            )
+            # 计算初始KL散度
+            initial_kl_penalty = old_log_probs - ref_log_probs
         
         # 标准化优势
         advantages = (relative_advantages - relative_advantages.mean()) / (relative_advantages.std() + 1e-8)
-        
-        # 保存旧的log概率
-        old_log_probs = log_probs.detach()
         
         # 🔥 4. GSPO更新循环
         self.policy_model.train()
@@ -370,9 +365,12 @@ class GSPOTrainer:
                 prompts_truncated, responses_truncated, use_ref_model=False, return_per_token=USE_TOKEN_LEVEL_LOSS
             )
             
+            # 重新计算KL散度（使用当前策略）
+            current_kl_penalty = new_log_probs - ref_log_probs.detach()
+            
             # 计算损失
             policy_loss, entropy_loss, kl_loss = self.compute_policy_loss(
-                new_log_probs, old_log_probs, advantages, kl_penalty,
+                new_log_probs, old_log_probs, advantages, current_kl_penalty,
                 token_log_probs_list=new_token_log_probs_list,
                 old_token_log_probs_list=old_token_log_probs_list
             )
@@ -391,7 +389,7 @@ class GSPOTrainer:
             total_kl_loss += kl_loss.item()
             
             # 显式清理显存
-            del new_log_probs, policy_loss, entropy_loss, kl_loss, total_loss
+            del new_log_probs, current_kl_penalty, policy_loss, entropy_loss, kl_loss, total_loss
             if new_token_log_probs_list:
                 del new_token_log_probs_list
             
@@ -399,8 +397,8 @@ class GSPOTrainer:
             torch.cuda.empty_cache()
             gc.collect()
         
-        # 自适应调整KL系数
-        self.update_kl_coef(kl_penalty)
+        # 自适应调整KL系数（使用初始KL散度）
+        self.update_kl_coef(initial_kl_penalty)
         
         metrics = {
             "policy_loss": total_policy_loss / GSPO_EPOCHS,
@@ -408,7 +406,7 @@ class GSPOTrainer:
             "kl_loss": total_kl_loss / GSPO_EPOCHS,
             "reward": raw_rewards.mean().item(),
             "relative_advantage": relative_advantages.mean().item(),
-            "kl_divergence": kl_penalty.mean().item(),
+            "kl_divergence": initial_kl_penalty.mean().item(),
             "kl_coef": self.kl_coef,
             "avg_response_length": sum(response_lengths_truncated) / len(response_lengths_truncated)
         }
