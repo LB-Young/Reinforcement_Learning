@@ -6,12 +6,12 @@
 
 ```bash
 cd RL_HAND/ppo
-python ppo_v1.py
+python ppo.py
 ```
 
 ### 2. 自定义配置
 
-编辑 `ppo_v1.py` 中的配置部分：
+编辑 `ppo.py` 中的配置部分：
 
 ```python
 # 模型路径
