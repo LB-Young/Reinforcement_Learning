@@ -191,23 +191,17 @@ class GSPOMultiGPUTrainer:
         
         print("✅ 所有模型加载完成")
 
-    def generate_responses_with_group_sampling(self, prompts: List[str]) -> Tuple[List[str], List[str], List[int]]:
-        """🔥 GSPO Group Sampling: 为每个prompt生成GROUP_SIZE个回复
+    def _generate_on_gpu(self, prompts: List[str], gpu_id: int) -> Tuple[List[str], List[str], List[int]]:
+        """在指定GPU上生成responses"""
+        device = torch.device(f"cuda:{gpu_id}")
+        responses, prompts_out, lengths = [], [], []
         
-        注意：生成阶段使用单卡（generate方法不支持DataParallel）
-        如需多卡生成，可以手动将prompts分配到不同GPU并行生成
-        """
-        self.policy_model.eval()
-        all_responses, all_prompts, all_lengths = [], [], []
-        
-        # 使用未包装的模型进行生成（generate不支持DataParallel）
-        model_for_generation = self.policy_model_unwrapped
-        
+        # 为每个prompt生成GROUP_SIZE个回复
         for prompt in prompts:
             for _ in range(GROUP_SIZE):
-                inputs = self.tokenizer(prompt, return_tensors="pt").to(self.policy_device)
+                inputs = self.tokenizer(prompt, return_tensors="pt").to(device)
                 with torch.no_grad():
-                    outputs = model_for_generation.generate(
+                    outputs = self.policy_model_unwrapped.generate(
                         **inputs,
                         max_new_tokens=128,
                         do_sample=True,
@@ -220,11 +214,55 @@ class GSPOMultiGPUTrainer:
                 response = self.tokenizer.batch_decode(gen_ids, skip_special_tokens=True)[0]
                 length = len(gen_ids[0])
                 
-                all_responses.append(response)
-                all_prompts.append(prompt)
-                all_lengths.append(length)
+                responses.append(response)
+                prompts_out.append(prompt)
+                lengths.append(length)
                 
                 del inputs, outputs, gen_ids
+        
+        return responses, prompts_out, lengths
+
+    def generate_responses_with_group_sampling(self, prompts: List[str]) -> Tuple[List[str], List[str], List[int]]:
+        """🔥 GSPO Group Sampling: 为每个prompt生成GROUP_SIZE个回复
+        
+        多GPU并行生成策略：
+        - 将prompts均匀分配到POLICY_GPU_IDS中的所有GPU
+        - 使用多线程在不同GPU上并行生成
+        """
+        self.policy_model.eval()
+        
+        num_gpus = len(POLICY_GPU_IDS)
+        
+        # 如果只有一张GPU，直接生成
+        if num_gpus == 1:
+            return self._generate_on_gpu(prompts, POLICY_GPU_IDS[0])
+        
+        # 🔥 多GPU并行生成
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        # 将prompts分配到不同GPU
+        prompts_per_gpu = [[] for _ in range(num_gpus)]
+        for i, prompt in enumerate(prompts):
+            gpu_idx = i % num_gpus
+            prompts_per_gpu[gpu_idx].append(prompt)
+        
+        # 并行生成
+        all_responses, all_prompts, all_lengths = [], [], []
+        
+        with ThreadPoolExecutor(max_workers=num_gpus) as executor:
+            futures = []
+            for gpu_idx, gpu_prompts in enumerate(prompts_per_gpu):
+                if len(gpu_prompts) > 0:
+                    gpu_id = POLICY_GPU_IDS[gpu_idx]
+                    future = executor.submit(self._generate_on_gpu, gpu_prompts, gpu_id)
+                    futures.append(future)
+            
+            # 收集结果
+            for future in as_completed(futures):
+                responses, prompts_out, lengths = future.result()
+                all_responses.extend(responses)
+                all_prompts.extend(prompts_out)
+                all_lengths.extend(lengths)
         
         torch.cuda.empty_cache()
         return all_responses, all_prompts, all_lengths
