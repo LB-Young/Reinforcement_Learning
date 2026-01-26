@@ -61,7 +61,7 @@ train_datasets = [
     }
 ]
 
-BATCH_SIZE = 2              # 可以适当增大
+BATCH_SIZE = 4              # 🔥 增大batch以更好利用多GPU（至少要>=GPU数量）
 LEARNING_RATE = 1e-6
 DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 NUM_EPOCHS = 1
@@ -192,16 +192,22 @@ class GSPOMultiGPUTrainer:
         print("✅ 所有模型加载完成")
 
     def generate_responses_with_group_sampling(self, prompts: List[str]) -> Tuple[List[str], List[str], List[int]]:
-        """🔥 GSPO Group Sampling: 为每个prompt生成GROUP_SIZE个回复"""
+        """🔥 GSPO Group Sampling: 为每个prompt生成GROUP_SIZE个回复
+        
+        注意：生成阶段使用单卡（generate方法不支持DataParallel）
+        如需多卡生成，可以手动将prompts分配到不同GPU并行生成
+        """
         self.policy_model.eval()
         all_responses, all_prompts, all_lengths = [], [], []
+        
+        # 使用未包装的模型进行生成（generate不支持DataParallel）
+        model_for_generation = self.policy_model_unwrapped
         
         for prompt in prompts:
             for _ in range(GROUP_SIZE):
                 inputs = self.tokenizer(prompt, return_tensors="pt").to(self.policy_device)
                 with torch.no_grad():
-                    # DataParallel 会自动处理多GPU
-                    outputs = self.policy_model.generate(
+                    outputs = model_for_generation.generate(
                         **inputs,
                         max_new_tokens=128,
                         do_sample=True,
@@ -225,10 +231,10 @@ class GSPOMultiGPUTrainer:
 
     def compute_log_probs(self, prompts: List[str], responses: List[str], 
                          use_ref_model: bool = False, return_per_token: bool = False) -> Tuple[torch.Tensor, List[torch.Tensor]]:
-        """计算log概率，支持序列级和token级"""
-        all_log_probs = []
-        all_token_log_probs = []
+        """计算log概率，支持序列级和token级
         
+        🔥 这里会使用DataParallel进行多GPU并行计算（如果batch足够大）
+        """
         if use_ref_model:
             model = self.ref_model
             device = self.device_ref
@@ -236,28 +242,40 @@ class GSPOMultiGPUTrainer:
             model = self.policy_model
             device = self.policy_device
         
-        for prompt, response in zip(prompts, responses):
-            full_text = prompt + response
-            full_inputs = self.tokenizer(full_text, return_tensors="pt", padding=True, truncation=True).to(device)
-            
+        # 🔥 批量处理以利用DataParallel（而不是逐个处理）
+        batch_size = len(prompts)
+        
+        # 准备批量输入
+        full_texts = [p + r for p, r in zip(prompts, responses)]
+        full_inputs = self.tokenizer(full_texts, return_tensors="pt", padding=True, truncation=True).to(device)
+        
+        # 计算每个样本的response起始位置
+        response_starts = []
+        for prompt in prompts:
             prompt_inputs = self.tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
-            response_start = prompt_inputs["input_ids"].shape[1]
+            response_starts.append(prompt_inputs["input_ids"].shape[1])
+        
+        with torch.no_grad() if use_ref_model else torch.enable_grad():
+            # 🔥 批量前向传播 - DataParallel会自动分配到多GPU
+            outputs = model(**full_inputs)
+            logits = outputs.logits
             
-            with torch.no_grad() if use_ref_model else torch.enable_grad():
-                outputs = model(**full_inputs)
-                logits = outputs.logits
-                
-                log_probs = F.log_softmax(logits, dim=-1)
-                token_log_probs = log_probs.gather(2, full_inputs["input_ids"].unsqueeze(-1)).squeeze(-1)
-                
-                response_log_probs = token_log_probs[0, response_start-1:-1]
+            log_probs = F.log_softmax(logits, dim=-1)
+            token_log_probs = log_probs.gather(2, full_inputs["input_ids"].unsqueeze(-1)).squeeze(-1)
+            
+            # 提取每个样本的response log probs
+            all_log_probs = []
+            all_token_log_probs = []
+            
+            for i, response_start in enumerate(response_starts):
+                response_log_probs = token_log_probs[i, response_start-1:-1]
                 
                 if return_per_token:
                     all_token_log_probs.append(response_log_probs)
                 
                 all_log_probs.append(response_log_probs.sum())
-                
-                del full_inputs, outputs, logits, log_probs, token_log_probs
+            
+            del full_inputs, outputs, logits, log_probs, token_log_probs
         
         torch.cuda.empty_cache()
         
